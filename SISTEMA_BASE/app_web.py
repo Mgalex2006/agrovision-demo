@@ -1,100 +1,190 @@
 import os
 import cv2
+import csv
+import random
+from datetime import datetime
 import numpy as np
 import streamlit as st
 from PIL import Image
 from ultralytics import YOLO
+import folium
+from streamlit_folium import st_folium
 
-# Rutas a los modelos
+# --- CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RUTA_DETECTOR = os.path.join(BASE_DIR, "ojos_detector.pt")
 RUTA_PEPINO = os.path.join(BASE_DIR, "..", "IA_PEPINO", "cerebro_pepino_v1.pt")
 RUTA_PIMIENTO = os.path.join(BASE_DIR, "..", "IA_PIMIENTO", "cerebro_pimiento_v1.pt")
+ARCHIVO_DB = os.path.join(BASE_DIR, "historial_plagas.csv")
 
-# Diccionarios de traducción según hortaliza
+# Fallback de rutas si los modelos están en la raíz
+if not os.path.exists(RUTA_PEPINO):
+    RUTA_PEPINO = os.path.join(BASE_DIR, "cerebro_pepino_v1.pt")
+if not os.path.exists(RUTA_PIMIENTO):
+    RUTA_PIMIENTO = os.path.join(BASE_DIR, "cerebro_pimiento_v1.pt")
+
+# Diccionarios de clases
 CLASES_PEPINO = {
-    "Downy_mildew": "Mildiú (Downy Mildew)",
-    "Powdery_mildew": "Oídio (Powdery Mildew)",
-    "Healthy_leaves": "Hoja Sana"
+    "Downy_mildew": "Mildiú",
+    "Powdery_mildew": "Oídio (Ceniza)",
+    "Healthy_leaves": "SANA"
 }
 
 CLASES_PIMIENTO = {
     "Powdery_mildew": "Oídio (Ceniza)",
-    "Thrips_parvispinus": "Thrips (Plaga)",
-    "Healthy_leaves": "Hoja Sana",
-    "Healthy": "Hoja Sana"
+    "Thrips_parvispinus": "THRIPS",
+    "Healthy_leaves": "SANA",
+    "Healthy": "SANA"
 }
 
-st.set_page_config(page_title="AgroVision AI", layout="wide")
+# --- GESTIÓN DE BASE DE DATOS (CSV) ---
+def guardar_en_historial(enfermedad, lat, lon):
+    existe = os.path.isfile(ARCHIVO_DB)
+    with open(ARCHIVO_DB, mode='a', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        if not existe:
+            writer.writerow(["FECHA", "HORA", "ENFERMEDAD", "LATITUD", "LONGITUD"])
+        ahora = datetime.now()
+        writer.writerow([
+            ahora.strftime("%Y-%m-%d"),
+            ahora.strftime("%H:%M:%S"),
+            enfermedad,
+            round(lat, 6),
+            round(lon, 6)
+        ])
 
-st.title("🌱 AgroVision AI: Diagnóstico Fitosanitario")
-st.markdown("Herramienta de Computer Vision para la detección de patologías específicas en hoja mediante redes neuronales convolucionales.")
+def leer_historial():
+    puntos = []
+    if os.path.isfile(ARCHIVO_DB):
+        with open(ARCHIVO_DB, mode='r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                try:
+                    puntos.append(row)
+                except Exception:
+                    pass
+    return puntos
+
+# --- SIMULADOR DE TELEMETRÍA Y GPS ---
+def obtener_coordenadas_muestra():
+    # Coordenadas base en zona agrícola intensiva (El Ejido)
+    lat_base = 36.7725
+    lon_base = -2.8140
+    lat_actual = lat_base + random.uniform(-0.005, 0.005)
+    lon_actual = lon_base + random.uniform(-0.005, 0.005)
+    return lat_actual, lon_actual
+
+# --- GENERADOR DEL MAPA EPIDEMIOLÓGICO ---
+def crear_mapa(lat_centro, lon_centro, historial):
+    mapa = folium.Map(
+        location=[lat_centro, lon_centro],
+        zoom_start=15,
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri Satellite'
+    )
+    
+    colores = {
+        "SANA": "green",
+        "Oídio (Ceniza)": "orange",
+        "Mildiú": "purple",
+        "THRIPS": "red"
+    }
+
+    for p in historial:
+        enf = p.get("ENFERMEDAD", "Desconocido")
+        color = colores.get(enf, "blue")
+        popup_html = f"<b>{enf}</b><br>Fecha: {p.get('FECHA')}<br>Hora: {p.get('HORA')}"
+        folium.Marker(
+            location=[float(p["LATITUD"]), float(p["LONGITUD"])],
+            popup=popup_html,
+            tooltip=f"{enf} ({p.get('FECHA')})",
+            icon=folium.Icon(color=color, icon="info-sign")
+        ).add_to(mapa)
+
+    return mapa
+
+# --- INTERFAZ STREAMLIT ---
+st.set_page_config(page_title="AgroVision AI - Red Fitosanitaria", layout="wide")
+
+st.title("🌱 AgroVision AI: Diagnóstico y Mapa Epidemiológico en Tiempo Real")
+st.markdown("Plataforma colaborativa de detección fitosanitaria. Los diagnósticos confirmados se geoposicionan automáticamente para alerta comunitaria entre explotaciones colindantes.")
 
 # Selector de cultivo
-cultivo = st.selectbox(
-    "Selecciona el cultivo que vas a analizar:",
-    ("Pepino", "Pimiento")
-)
+cultivo = st.selectbox("Selecciona cultivo a inspeccionar:", ("Pepino", "Pimiento"))
 
-# Información de patologías detectables
 if cultivo == "Pepino":
-    st.info("📋 **Patologías detectables en Pepino:** Mildiú (`Downy_mildew`), Oídio (`Powdery_mildew`) y Hoja Sana (`Healthy_leaves`).")
+    st.info("📋 **Patologías registrables en Pepino:** Mildiú (`Downy_mildew`), Oídio (`Powdery_mildew`) y Hoja Sana (`Healthy_leaves`).")
     ruta_modelo = RUTA_PEPINO
-    dicc_traduccion = CLASES_PEPINO
+    dicc = CLASES_PEPINO
 else:
-    st.info("📋 **Patologías detectables en Pimiento:** Oídio (`Powdery_mildew`), Thrips (`Thrips_parvispinus`) y Hoja Sana (`Healthy_leaves`).")
+    st.info("📋 **Patologías registrables en Pimiento:** Oídio (`Powdery_mildew`), Thrips (`Thrips_parvispinus`) y Hoja Sana (`Healthy_leaves`).")
     ruta_modelo = RUTA_PIMIENTO
-    dicc_traduccion = CLASES_PIMIENTO
+    dicc = CLASES_PIMIENTO
 
 col1, col2 = st.columns([1, 1])
 
+# Estado de sesión para persistir mapa tras análisis
+if "ultima_deteccion" not in st.session_state:
+    st.session_state.ultima_deteccion = None
+
 with col1:
     archivo_subido = st.file_uploader(
-        f"Arrastra o selecciona una foto de hoja de {cultivo.lower()}:", 
+        f"Cargar imagen de hoja de {cultivo.lower()}:",
         type=["jpg", "jpeg", "png"]
     )
     
     if archivo_subido is not None:
-        imagen_pil = Image.open(archivo_subido)
-        st.image(imagen_pil, caption=f"Imagen cargada ({cultivo})", use_container_width=True)
+        img_pil = Image.open(archivo_subido)
+        st.image(img_pil, caption=f"Muestra: {cultivo}", use_container_width=True)
+
+        if st.button("🔍 Diagnosticar y Geoposicionar", type="primary"):
+            with st.spinner("Ejecutando inferencia neuronal..."):
+                if not os.path.exists(ruta_modelo):
+                    st.error(f"Modelo no disponible en: {ruta_modelo}")
+                else:
+                    clasificador = YOLO(ruta_modelo)
+                    img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                    
+                    res = clasificador(img_cv, verbose=False)
+                    top1 = res[0].probs.top1
+                    conf = res[0].probs.top1conf.item() * 100
+                    clase_raw = res[0].names[top1]
+                    diagnostico = dicc.get(clase_raw, clase_raw)
+
+                    # Simular adquisición de GPS en campo
+                    lat_gps, lon_gps = obtener_coordenadas_muestra()
+                    
+                    # Registrar en base de datos epidemiológica
+                    guardar_en_historial(diagnostico, lat_gps, lon_gps)
+                    
+                    st.session_state.ultima_deteccion = {
+                        "diagnostico": diagnostico,
+                        "confianza": conf,
+                        "lat": lat_gps,
+                        "lon": lon_gps
+                    }
+
+    if st.session_state.ultima_deteccion:
+        det = st.session_state.ultima_deteccion
+        if "SANA" in det["diagnostico"]:
+            st.success(f"### Resultado: Tejido SANO ({det['confianza']:.1f}%)")
+        else:
+            st.error(f"### ⚠️ Foco detectado: {det['diagnostico']} ({det['confianza']:.1f}%)")
+            st.warning(f"📍 Muestra georreferenciada en: Lat {det['lat']:.5f}, Lon {det['lon']:.5f}. Punto añadido al mapa comunitario.")
 
 with col2:
-    if archivo_subido is not None:
-        st.subheader("Resultado del Diagnóstico")
-        
-        if st.button("🔍 Ejecutar Análisis", type="primary"):
-            with st.spinner("Procesando imagen con modelo YOLO..."):
-                if not os.path.exists(ruta_modelo):
-                    st.error(f"No se encuentra el modelo entrenado en: {ruta_modelo}")
-                else:
-                    # Cargar modelo clasificador
-                    clasificador = YOLO(ruta_modelo)
-                    
-                    # Cargar imagen en OpenCV
-                    img_np = np.array(imagen_pil)
-                    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    st.subheader("🗺️ Red Satelital de Incidencias en la Zona")
+    st.caption("Pines en el mapa: 🟠 Oídio | 🟣 Mildiú | 🔴 Thrips | 🟢 Sano")
+    
+    historial = leer_historial()
+    
+    if st.session_state.ultima_deteccion:
+        centro_lat = st.session_state.ultima_deteccion["lat"]
+        centro_lon = st.session_state.ultima_deteccion["lon"]
+    elif len(historial) > 0:
+        centro_lat = float(historial[-1]["LATITUD"])
+        centro_lon = float(historial[-1]["LONGITUD"])
+    else:
+        centro_lat, centro_lon = 36.7725, -2.8140
 
-                    # Inferencia de clasificación directa
-                    res = clasificador(img_cv, verbose=False)
-                    top1_idx = res[0].probs.top1
-                    confianza = res[0].probs.top1conf.item() * 100
-                    clase_raw = res[0].names[top1_idx]
-                    diagnostico = dicc_traduccion.get(clase_raw, clase_raw)
-
-                    # Tarjeta de resultado
-                    if "Sana" in diagnostico or "Healthy" in diagnostico:
-                        st.success(f"### Estado: {diagnostico}")
-                    else:
-                        st.error(f"### Patología detectada: {diagnostico}")
-                        
-                    st.metric(label="Nivel de Confianza del Modelo", value=f"{confianza:.2f}%")
-                    
-                    # Recomendación básica
-                    if "Oídio" in diagnostico or "Powdery" in diagnostico:
-                        st.warning("⚠️ **Acción:** Tratamiento fungicida antioídio (p. ej. azufre) y ventilar el invernadero para bajar humedad.")
-                    elif "Mildiú" in diagnostico or "Downy" in diagnostico:
-                        st.warning("⚠️ **Acción:** Tratamiento con fungicida específico para mildiú y control estricto de condensación en cubierta.")
-                    elif "Thrips" in diagnostico:
-                        st.warning("⚠️ **Acción:** Suelta de fauna auxiliar (*Orius laevigatus*) o insecticida autorizado.")
-                    else:
-                        st.info("Planta en estado óptimo. No requiere tratamiento.")
+    mapa_objeto = crear_mapa(centro_lat, centro_lon, historial)
+    st_folium(mapa_objeto, width=650, height=520)
