@@ -3,6 +3,7 @@ import cv2
 import csv
 import random
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import numpy as np
 import streamlit as st
 from PIL import Image
@@ -16,7 +17,6 @@ RUTA_PEPINO = os.path.join(BASE_DIR, "..", "IA_PEPINO", "cerebro_pepino_v1.pt")
 RUTA_PIMIENTO = os.path.join(BASE_DIR, "..", "IA_PIMIENTO", "cerebro_pimiento_v1.pt")
 ARCHIVO_DB = os.path.join(BASE_DIR, "historial_plagas.csv")
 
-# Fallback de rutas si los modelos están en la raíz
 if not os.path.exists(RUTA_PEPINO):
     RUTA_PEPINO = os.path.join(BASE_DIR, "cerebro_pepino_v1.pt")
 if not os.path.exists(RUTA_PIMIENTO):
@@ -36,14 +36,15 @@ CLASES_PIMIENTO = {
     "Healthy": "SANA"
 }
 
-# --- GESTIÓN DE BASE DE DATOS (CSV) ---
+# --- GESTIÓN DE BASE DE DATOS (CSV) CON HORA PENINSULAR ESPAÑOLA ---
 def guardar_en_historial(enfermedad, lat, lon):
     existe = os.path.isfile(ARCHIVO_DB)
     with open(ARCHIVO_DB, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         if not existe:
             writer.writerow(["FECHA", "HORA", "ENFERMEDAD", "LATITUD", "LONGITUD"])
-        ahora = datetime.now()
+        # Hora local exacta de España peninsular
+        ahora = datetime.now(ZoneInfo("Europe/Madrid"))
         writer.writerow([
             ahora.strftime("%Y-%m-%d"),
             ahora.strftime("%H:%M:%S"),
@@ -64,23 +65,32 @@ def leer_historial():
                     pass
     return puntos
 
-# --- SIMULADOR DE TELEMETRÍA Y GPS ---
+# --- SIMULADOR DE COORDENADAS ---
 def obtener_coordenadas_muestra():
-    # Coordenadas base en zona agrícola intensiva (El Ejido)
     lat_base = 36.7725
     lon_base = -2.8140
     lat_actual = lat_base + random.uniform(-0.005, 0.005)
     lon_actual = lon_base + random.uniform(-0.005, 0.005)
     return lat_actual, lon_actual
 
-# --- GENERADOR DEL MAPA EPIDEMIOLÓGICO ---
+# --- GENERADOR DEL MAPA LIMPIO (SIN BARRAS NI MARCAS) ---
 def crear_mapa(lat_centro, lon_centro, historial):
+    # attribution_control=False elimina la franja inferior blanca
     mapa = folium.Map(
         location=[lat_centro, lon_centro],
         zoom_start=15,
-        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri Satellite'
+        attribution_control=False,
+        control_scale=False
     )
+    
+    # Capa satelital limpia sin texto de atribución visible
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr=' ',
+        name='Satelite',
+        overlay=False,
+        control=False
+    ).add_to(mapa)
     
     colores = {
         "SANA": "green",
@@ -96,7 +106,7 @@ def crear_mapa(lat_centro, lon_centro, historial):
         folium.Marker(
             location=[float(p["LATITUD"]), float(p["LONGITUD"])],
             popup=popup_html,
-            tooltip=f"{enf} ({p.get('FECHA')})",
+            tooltip=f"{enf} ({p.get('FECHA')} {p.get('HORA')})",
             icon=folium.Icon(color=color, icon="info-sign")
         ).add_to(mapa)
 
@@ -108,7 +118,6 @@ st.set_page_config(page_title="AgroVision AI - Red Fitosanitaria", layout="wide"
 st.title("🌱 AgroVision AI: Diagnóstico y Mapa Epidemiológico en Tiempo Real")
 st.markdown("Plataforma colaborativa de detección fitosanitaria. Los diagnósticos confirmados se geoposicionan automáticamente para alerta comunitaria entre explotaciones colindantes.")
 
-# Selector de cultivo
 cultivo = st.selectbox("Selecciona cultivo a inspeccionar:", ("Pepino", "Pimiento"))
 
 if cultivo == "Pepino":
@@ -122,7 +131,6 @@ else:
 
 col1, col2 = st.columns([1, 1])
 
-# Estado de sesión para persistir mapa tras análisis
 if "ultima_deteccion" not in st.session_state:
     st.session_state.ultima_deteccion = None
 
@@ -150,10 +158,7 @@ with col1:
                     clase_raw = res[0].names[top1]
                     diagnostico = dicc.get(clase_raw, clase_raw)
 
-                    # Simular adquisición de GPS en campo
                     lat_gps, lon_gps = obtener_coordenadas_muestra()
-                    
-                    # Registrar en base de datos epidemiológica
                     guardar_en_historial(diagnostico, lat_gps, lon_gps)
                     
                     st.session_state.ultima_deteccion = {
